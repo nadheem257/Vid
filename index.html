@@ -2,104 +2,141 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>1-on-1 Video Call</title>
+<title>Public Video Call</title>
 <style>
-body { margin:0; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; background:#111; color:white; font-family:sans-serif; }
-video { width:45%; margin:10px; border-radius:10px; background:black; }
-button { padding:10px 20px; font-size:16px; margin:5px; border:none; border-radius:8px; cursor:pointer; background:#0af; color:black; font-weight:bold; transition:.2s; }
-button:hover { background:#0ff; }
+  body { margin:0; background:#111; color:white; font-family:sans-serif; display:flex; flex-direction:column; align-items:center; }
+  #videos { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin-top:20px; }
+  video { width:300px; border-radius:10px; background:#000; }
+  #controls { margin-top:10px; }
+  button { padding:10px 15px; margin:5px; font-size:16px; border:none; border-radius:8px; cursor:pointer; }
+  #status { margin-top:10px; font-size:14px; color:#0f0; }
 </style>
 </head>
 <body>
 
-<h1>1-on-1 Video Call</h1>
-<video id="localVideo" autoplay playsinline muted></video>
-<video id="remoteVideo" autoplay playsinline></video>
-<div>
-<button id="startCall">Start / Join Call</button>
+<h1>Public Video Call</h1>
+<div id="videos"></div>
+<div id="controls">
+  <button id="muteBtn">Mute</button>
+  <button id="videoBtn">Stop Video</button>
 </div>
+<div id="status"></div>
 
 <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
-
 <script>
 const firebaseConfig = {
-  apiKey:"AIzaSyCwSqm65CoNwPc3PiVo1T40YJM2MAcg480",
-  authDomain:"server-1-9fa4f.firebaseapp.com",
-  databaseURL:"https://server-1-9fa4f-default-rtdb.firebaseio.com",
-  projectId:"server-1-9fa4f",
-  storageBucket:"server-1-9fa4f.firebasestorage.app",
-  messagingSenderId:"1019529146427",
-  appId:"1:1019529146427:web:e22f6bbe1623b528f6ec1e"
+  apiKey: "AIzaSyCwSqm65CoNwPc3PiVo1T40YJM2MAcg480",
+  authDomain: "server-1-9fa4f.firebaseapp.com",
+  databaseURL: "https://server-1-9fa4f-default-rtdb.firebaseio.com",
+  projectId: "server-1-9fa4f",
+  storageBucket: "server-1-9fa4f.firebasestorage.app",
+  messagingSenderId: "1019529146427",
+  appId: "1:1019529146427:web:e22f6bbe1623b528f6ec1e"
 };
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-const localVideo = document.getElementById('localVideo');
-const remoteVideo = document.getElementById('remoteVideo');
-const startBtn = document.getElementById('startCall');
+const videosDiv = document.getElementById('videos');
+const muteBtn = document.getElementById('muteBtn');
+const videoBtn = document.getElementById('videoBtn');
+const statusDiv = document.getElementById('status');
 
-let pc;
 let localStream;
-const roomRef = db.ref('video-call-room');
+let peers = {}; // store RTCPeerConnections
+let myId = 'user-' + Math.random().toString(36).substr(2,5);
+const roomId = 'public-video-room'; // everyone joins same public room
 
-startBtn.onclick = async () => {
-    startBtn.disabled = true;
+// Get local media
+async function startLocalStream() {
+  localStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+  const localVideo = document.createElement('video');
+  localVideo.srcObject = localStream;
+  localVideo.autoplay = true;
+  localVideo.muted = true;
+  videosDiv.appendChild(localVideo);
+}
+startLocalStream();
 
-    // Get user media
-    localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
-    localVideo.srcObject = localStream;
+// Listen for new users
+const usersRef = db.ref('video-call/' + roomId + '/users/' + myId);
+usersRef.set({id:myId});
+usersRef.onDisconnect().remove();
 
-    pc = new RTCPeerConnection();
+// Handle signaling messages
+const signalsRef = db.ref('video-call/' + roomId + '/signals');
+signalsRef.on('child_added', async snapshot => {
+  const data = snapshot.val();
+  if (!data || data.sender === myId) return;
 
-    // Add tracks
-    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+  let peer;
+  if (!peers[data.sender]) {
+    peer = createPeerConnection(data.sender);
+    peers[data.sender] = peer;
+    localStream.getTracks().forEach(track => peer.addTrack(track, localStream));
+  } else {
+    peer = peers[data.sender];
+  }
 
-    // Remote track
-    pc.ontrack = e => {
-        remoteVideo.srcObject = e.streams[0];
-    };
+  if (data.type === 'offer') {
+    await peer.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
+    signalsRef.push({ type:'answer', sdp:answer, sender:myId, target:data.sender });
+  } else if (data.type === 'answer') {
+    await peer.setRemoteDescription(new RTCSessionDescription(data.sdp));
+  } else if (data.type === 'ice') {
+    try { await peer.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch(e){console.error(e);}
+  }
+});
 
-    // ICE candidates
-    pc.onicecandidate = event => {
-        if(event.candidate){
-            const candidateData = JSON.stringify(event.candidate);
-            roomRef.child('candidates').push(candidateData);
-        }
-    };
+// Create peer connection
+function createPeerConnection(peerId) {
+  const pc = new RTCPeerConnection();
 
-    // Listen for offers
-    roomRef.child('offer').on('value', async snap => {
-        const offer = snap.val();
-        if(offer && pc.signalingState === 'stable'){
-            await pc.setRemoteDescription(new RTCSessionDescription(offer));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            roomRef.child('answer').set(answer);
-        }
-    });
-
-    // Listen for answers
-    roomRef.child('answer').on('value', async snap => {
-        const answer = snap.val();
-        if(answer && pc.signalingState === 'have-local-offer'){
-            await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        }
-    });
-
-    // Listen for ICE candidates
-    roomRef.child('candidates').on('child_added', snap => {
-        const cand = JSON.parse(snap.val());
-        pc.addIceCandidate(new RTCIceCandidate(cand));
-    });
-
-    // If no offer exists, create offer
-    const roomSnapshot = await roomRef.once('value');
-    if(!roomSnapshot.hasChild('offer')){
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        roomRef.child('offer').set(offer);
+  pc.onicecandidate = e => {
+    if(e.candidate) {
+      signalsRef.push({ type:'ice', candidate:e.candidate, sender:myId, target:peerId });
     }
+  };
+
+  pc.ontrack = e => {
+    if(document.getElementById('video-'+peerId)) return;
+    const remoteVideo = document.createElement('video');
+    remoteVideo.srcObject = e.streams[0];
+    remoteVideo.autoplay = true;
+    remoteVideo.id = 'video-' + peerId;
+    videosDiv.appendChild(remoteVideo);
+  };
+
+  return pc;
+}
+
+// Detect other users
+const usersListRef = db.ref('video-call/' + roomId + '/users');
+usersListRef.on('value', async snapshot => {
+  const val = snapshot.val() || {};
+  for (let uid in val) {
+    if (uid === myId) continue;
+    if (!peers[uid]) {
+      const peer = createPeerConnection(uid);
+      peers[uid] = peer;
+      localStream.getTracks().forEach(track => peer.addTrack(track, localStream));
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      signalsRef.push({ type:'offer', sdp:offer, sender:myId, target:uid });
+    }
+  }
+});
+
+// Mute / Stop Video buttons
+muteBtn.onclick = () => {
+  localStream.getAudioTracks().forEach(t=>t.enabled = !t.enabled);
+  muteBtn.innerText = localStream.getAudioTracks()[0].enabled ? "Mute" : "Unmute";
+};
+videoBtn.onclick = () => {
+  localStream.getVideoTracks().forEach(t=>t.enabled = !t.enabled);
+  videoBtn.innerText = localStream.getVideoTracks()[0].enabled ? "Stop Video" : "Start Video";
 };
 </script>
 </body>
