@@ -2,27 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>2-User Video Call</title>
+<title>2-Person Auto Video Call</title>
 <style>
 body { margin:0; display:flex; flex-direction:column; justify-content:center; align-items:center; height:100vh; background:#05050a; color:white; font-family:sans-serif;}
 video { width:45%; max-width:400px; margin:10px; border:2px solid #00eaff; border-radius:12px; background:black;}
-input, button { padding:10px; margin:5px; font-size:16px; border:none; border-radius:6px; }
-button { background:#00eaff; cursor:pointer; color:black; transition:.2s; }
-button:hover { background:#00fff6; }
 </style>
 </head>
 <body>
 
-<h2>2-Person Video Call</h2>
-<div>
-  <video id="localVideo" autoplay muted playsinline></video>
-  <video id="remoteVideo" autoplay playsinline></video>
-</div>
-<div>
-  <input id="callIdInput" placeholder="Enter Call ID">
-  <button id="startBtn">Start Call</button>
-  <button id="joinBtn">Join Call</button>
-</div>
+<h2>2-Person Video Call (Auto Connect)</h2>
+<video id="localVideo" autoplay muted playsinline></video>
+<video id="remoteVideo" autoplay playsinline></video>
 
 <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
@@ -42,83 +32,61 @@ const db = firebase.database();
 
 let localVideo = document.getElementById('localVideo');
 let remoteVideo = document.getElementById('remoteVideo');
-let localStream, pc, callId;
+let localStream, pc;
+const roomRef = db.ref("auto-call"); // single room
+const candidatesRef = roomRef.child("candidates");
+let isCaller = false;
 
-const servers = { iceServers: [{urls:'stun:stun.l.google.com:19302'}] };
+const servers = { iceServers:[{urls:"stun:stun.l.google.com:19302"}] };
 
-async function initLocalVideo() {
-  localStream = await navigator.mediaDevices.getUserMedia({video:true, audio:true});
+async function init() {
+  localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
   localVideo.srcObject = localStream;
+
+  const snapshot = await roomRef.once('value');
+  if(snapshot.exists() && snapshot.child("offer").exists()) {
+    // Join as callee
+    pc = createPeerConnection(false);
+    const offer = snapshot.val().offer;
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await roomRef.child("answer").set(answer.toJSON());
+  } else {
+    // Become caller
+    isCaller = true;
+    pc = createPeerConnection(true);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await roomRef.child("offer").set(offer.toJSON());
+    roomRef.child("answer").on('value', async snap => {
+      const ans = snap.val();
+      if(ans && !pc.currentRemoteDescription){
+        await pc.setRemoteDescription(new RTCSessionDescription(ans));
+      }
+    });
+  }
+
+  // Listen ICE candidates
+  candidatesRef.on('child_added', snap => {
+    const cand = snap.val();
+    if(cand) pc.addIceCandidate(new RTCIceCandidate(cand));
+  });
 }
 
-function createPeerConnection() {
+function createPeerConnection(caller){
   const pc = new RTCPeerConnection(servers);
-
   localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-  pc.ontrack = event => {
-    remoteVideo.srcObject = event.streams[0];
-  };
+  pc.ontrack = e => remoteVideo.srcObject = e.streams[0];
 
-  pc.onicecandidate = event => {
-    if (event.candidate) {
-      db.ref('calls/'+callId+'/candidates').push(event.candidate.toJSON());
-    }
+  pc.onicecandidate = e => {
+    if(e.candidate) candidatesRef.push(e.candidate.toJSON());
   };
-
   return pc;
 }
 
-// Start Call
-document.getElementById('startBtn').onclick = async () => {
-  await initLocalVideo();
-  callId = Math.random().toString(36).substring(2,7);
-  document.getElementById('callIdInput').value = callId;
-
-  pc = createPeerConnection();
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  await db.ref('calls/'+callId+'/offer').set(offer.toJSON());
-
-  db.ref('calls/'+callId+'/answer').on('value', async snap => {
-    const answer = snap.val();
-    if(answer && !pc.currentRemoteDescription){
-      await pc.setRemoteDescription(new RTCSessionDescription(answer));
-    }
-  });
-
-  db.ref('calls/'+callId+'/candidates').on('child_added', snap => {
-    const cand = snap.val();
-    pc.addIceCandidate(new RTCIceCandidate(cand));
-  });
-
-  alert("Call started! Share Call ID: "+callId);
-};
-
-// Join Call
-document.getElementById('joinBtn').onclick = async () => {
-  callId = document.getElementById('callIdInput').value.trim();
-  if(!callId) return alert("Enter Call ID");
-
-  await initLocalVideo();
-  pc = createPeerConnection();
-
-  const offerSnap = await db.ref('calls/'+callId+'/offer').once('value');
-  const offer = offerSnap.val();
-  if(!offer) return alert("Call ID not found");
-
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
-
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  await db.ref('calls/'+callId+'/answer').set(answer.toJSON());
-
-  db.ref('calls/'+callId+'/candidates').on('child_added', snap => {
-    const cand = snap.val();
-    pc.addIceCandidate(new RTCIceCandidate(cand));
-  });
-};
+init();
 </script>
 </body>
 </html>
