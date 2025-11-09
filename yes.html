@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>1-on-1 Video Call</title>
+<style>
+body { margin:0; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; background:#111; color:white; font-family:sans-serif; }
+video { width:45%; margin:10px; border-radius:10px; background:black; }
+button { padding:10px 20px; font-size:16px; margin:5px; border:none; border-radius:8px; cursor:pointer; background:#0af; color:black; font-weight:bold; transition:.2s; }
+button:hover { background:#0ff; }
+</style>
+</head>
+<body>
+
+<h1>1-on-1 Video Call</h1>
+<video id="localVideo" autoplay playsinline muted></video>
+<video id="remoteVideo" autoplay playsinline></video>
+<div>
+<button id="startCall">Start / Join Call</button>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+<script>
+const firebaseConfig = {
+  apiKey:"AIzaSyCwSqm65CoNwPc3PiVo1T40YJM2MAcg480",
+  authDomain:"server-1-9fa4f.firebaseapp.com",
+  databaseURL:"https://server-1-9fa4f-default-rtdb.firebaseio.com",
+  projectId:"server-1-9fa4f",
+  storageBucket:"server-1-9fa4f.firebasestorage.app",
+  messagingSenderId:"1019529146427",
+  appId:"1:1019529146427:web:e22f6bbe1623b528f6ec1e"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+const localVideo = document.getElementById('localVideo');
+const remoteVideo = document.getElementById('remoteVideo');
+const startBtn = document.getElementById('startCall');
+
+let pc;
+let localStream;
+const roomRef = db.ref('video-call-room');
+
+startBtn.onclick = async () => {
+    startBtn.disabled = true;
+
+    // Get user media
+    localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+    localVideo.srcObject = localStream;
+
+    pc = new RTCPeerConnection();
+
+    // Add tracks
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+    // Remote track
+    pc.ontrack = e => {
+        remoteVideo.srcObject = e.streams[0];
+    };
+
+    // ICE candidates
+    pc.onicecandidate = event => {
+        if(event.candidate){
+            const candidateData = JSON.stringify(event.candidate);
+            roomRef.child('candidates').push(candidateData);
+        }
+    };
+
+    // Listen for offers
+    roomRef.child('offer').on('value', async snap => {
+        const offer = snap.val();
+        if(offer && pc.signalingState === 'stable'){
+            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            roomRef.child('answer').set(answer);
+        }
+    });
+
+    // Listen for answers
+    roomRef.child('answer').on('value', async snap => {
+        const answer = snap.val();
+        if(answer && pc.signalingState === 'have-local-offer'){
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        }
+    });
+
+    // Listen for ICE candidates
+    roomRef.child('candidates').on('child_added', snap => {
+        const cand = JSON.parse(snap.val());
+        pc.addIceCandidate(new RTCIceCandidate(cand));
+    });
+
+    // If no offer exists, create offer
+    const roomSnapshot = await roomRef.once('value');
+    if(!roomSnapshot.hasChild('offer')){
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        roomRef.child('offer').set(offer);
+    }
+};
+</script>
+</body>
+</html>
